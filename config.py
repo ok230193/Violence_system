@@ -1,24 +1,45 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
+
 
 @dataclass(frozen=True)
 class AppConfig:
-    # 入力動画
-    INPUT_VIDEO: str = "../input_videos/5.mp4"
+    # ========= Input =========
+    # ファイル入力: "../input_videos/5.mp4"
+    # RTSP例: "rtsp://user:pass@host:554/stream"
+    INPUT: str = "../input_videos/5.mp4"
+    IS_RTSP: bool = False  # RTSP等のストリーム入力なら True
 
-    # 出力フォルダ
+    # ========= Output =========
     OUTPUT_DIR: str = "../output/clips"
 
-    # モデル
+    # ========= Model =========
     WEIGHTS: str = "yolo_small_weights.pt"
     CLASS_ID: int = 1          # Violence/Fight
     CONF_THRES: float = 0.4
-    IMGSZ: int = 640
+    IMG_SIZE: int = 640
+    DEVICE: str = "0"          # "0"=CUDA:0, "cpu"=CPU
+    HALF: bool = True          # 対応GPUならFP16推奨
 
-    # 区間生成の安定化
-    MIN_HITS: int = 5
+    # ========= Speed =========
+    FRAME_SKIP: int = 2        # Nフレームに1回推論（例:2なら2フレームに1回）
+    MAX_FPS: float | None = None  # 入力が速すぎる場合の上限（Noneで制限なし）
+
+    # ========= Offline segmentation =========
     MIN_EVENT_S: float = 1.0
-    MERGE_GAP_S: float = 2.0
-    PAD_S: float = 1.0
+    MERGE_GAP_S: float = 0.6
+    PAD_S: float = 0.7
 
-    # 切り出し
-    REENCODE: bool = False     # 精密に切りたいなら True
+    # ========= Realtime recording =========
+    PREBUFFER_S: float = 2.0     # 検知開始前に遡って保存する秒数
+    POSTBUFFER_S: float = 2.0    # 検知終了後に追加で保存する秒数
+    END_HOLD_S: float = 2.0      # 検知が途切れてもこの秒数はイベント継続扱い
+
+    # ========= Offline clipping =========
+    USE_FFMPEG_COPY: bool = True   # True: -c copy（高速/キーフレームズレあり）
+    FFMPEG_CRF: int = 23           # re-encode時
+    FFMPEG_PRESET: str = "veryfast"
+
+    # ========= Encoding for realtime async saver =========
+    REALTIME_FOURCC: str = "mp4v"  # 環境により"avc1","H264","XVID"などに変更

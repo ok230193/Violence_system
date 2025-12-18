@@ -1,10 +1,14 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import List, Tuple
+
 
 @dataclass
 class Segment:
     start_s: float
     end_s: float
+
 
 def frames_to_segments(
     hit_frames: List[int],
@@ -13,12 +17,12 @@ def frames_to_segments(
     merge_gap_s: float,
     pad_s: float,
 ) -> List[Segment]:
+    """Convert hit frame indices to merged, padded time segments."""
     if not hit_frames:
         return []
 
     hit_frames = sorted(set(hit_frames))
 
-    # 連続フレームを区間化（frame index）
     raw: List[Tuple[int, int]] = []
     s = hit_frames[0]
     prev = hit_frames[0]
@@ -27,13 +31,11 @@ def frames_to_segments(
             prev = f
         else:
             raw.append((s, prev))
-            s = f
-            prev = f
+            s = prev = f
     raw.append((s, prev))
 
-    segs = [Segment(a / fps, b / fps) for a, b in raw]
+    segs = [Segment(a / fps, (b + 1) / fps) for a, b in raw]
 
-    # ギャップが短いものは結合
     merged: List[Segment] = []
     for seg in segs:
         if not merged:
@@ -44,12 +46,10 @@ def frames_to_segments(
         else:
             merged.append(seg)
 
-    # 前後パディング & 短すぎる区間は除外
     out: List[Segment] = []
     for seg in merged:
         start = max(0.0, seg.start_s - pad_s)
         end = seg.end_s + pad_s
         if (end - start) >= min_event_s:
             out.append(Segment(start, end))
-
     return out

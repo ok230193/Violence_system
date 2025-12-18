@@ -102,13 +102,14 @@ def offline_file_mode(cfg: AppConfig) -> None:
 
 def realtime_mode(cfg: AppConfig) -> None:
     """
-    Single-pass + ring buffer + async save.
+    Single-pass + ring buffer + async save. (NO duplicate overlapping clips)
 
-    - Read continuously
-    - Keep PREBUFFER_S frames in deque
-    - Infer every FRAME_SKIP frames
-    - When detected starts: create clip with prebuffer
-    - End when detection absent for END_HOLD_S, plus POSTBUFFER_S tail
+    - Keep PREBUFFER_S frames in ring buffer (with frame index)
+    - Start clip only on rising edge (first detection) and not in cooldown
+    - While recording: extend stop_deadline on each detection (do NOT start new clips)
+    - Finalize when now >= stop_deadline
+    - When starting a new clip: exclude frames that are <= last_clip_end_frame_idx
+      so we don't duplicate tail frames from the previous clip.
     """
     ensure_dir(cfg.OUTPUT_DIR)
 
@@ -134,8 +135,7 @@ def realtime_mode(cfg: AppConfig) -> None:
     )
 
     prebuf_len = max(1, int(max(0.0, cfg.PREBUFFER_S) * fps))
-    postbuf_len = int(max(0.0, cfg.POSTBUFFER_S) * fps)
-    ring: Deque = deque(maxlen=prebuf_len)
+    ring: Deque[Tuple[int, any]] = deque(maxlen=prebuf_len)  # (frame_idx, frame)
 
     q: "Queue[Optional[SaveJob]]" = Queue(maxsize=8)
     saver = AsyncSaver(q)
@@ -143,11 +143,15 @@ def realtime_mode(cfg: AppConfig) -> None:
 
     limiter = FPSLimiter(cfg.MAX_FPS)
 
+    # ---- Event state ----
+    recording = False
     active_frames: List = []
-    active = False
-    post_remaining = 0
-    last_detect_t = 0.0
     clip_count = 0
+
+    stop_deadline = 0.0          # この時刻を過ぎたらイベント終了
+    cooldown_until = 0.0         # ここまでは新規開始しない
+
+    last_clip_end_frame_idx = -1 # 前クリップ末尾フレーム（重複防止用）
 
     frame_idx = 0
     while True:
@@ -160,59 +164,73 @@ def realtime_mode(cfg: AppConfig) -> None:
         if w == 0 or h == 0:
             h, w = frame.shape[:2]
 
-        ring.append(frame)
+        now = time.time()
 
+        # ring に (frame_idx, frame) を積む
+        ring.append((frame_idx, frame))
+
+        # 推論（間引き）
         detected = False
         if frame_idx % max(1, cfg.FRAME_SKIP) == 0:
             detected = detector.infer(frame)
-            if detected:
-                last_detect_t = time.time()
 
-        now = time.time()
-        holding = (now - last_detect_t) <= cfg.END_HOLD_S
-
-        if not active:
-            if detected:
-                active = True
-                post_remaining = postbuf_len
-                active_frames = list(ring) + [frame]
+        if not recording:
+            # 新規開始条件：検知 AND クールダウン解除
+            if detected and now >= cooldown_until:
+                recording = True
                 clip_count += 1
-                print(f"[start] clip #{clip_count}")
+
+                # PREBUFFER: 前クリップと重複するフレームは除外
+                pre_frames = [f for (i, f) in ring if i > last_clip_end_frame_idx]
+                active_frames = pre_frames + [frame]
+
+                # 終了締切：検知が来るたび延長される
+                stop_deadline = now + cfg.END_HOLD_S + cfg.POSTBUFFER_S
+                print(f"[start] clip #{clip_count} pre={len(pre_frames)}")
+
         else:
+            # イベント中：ひたすら追記
             active_frames.append(frame)
 
-            if holding:
-                post_remaining = postbuf_len
-            else:
-                post_remaining -= 1
-                if post_remaining <= 0:
-                    ts = time.strftime("%Y%m%d_%H%M%S")
-                    out_name = f"realtime_violence_{ts}_{clip_count:04d}.mp4"
-                    out_path = os.path.join(cfg.OUTPUT_DIR, out_name)
+            # 検知が来たら終了締切を延長（新規クリップは作らない！）
+            if detected:
+                stop_deadline = now + cfg.END_HOLD_S + cfg.POSTBUFFER_S
 
-                    job = SaveJob(
-                        frames=active_frames,
-                        fps=fps,
-                        size=(w, h),
-                        out_path=out_path,
-                        fourcc=cfg.REALTIME_FOURCC,
-                    )
-                    try:
-                        q.put_nowait(job)
-                        print(f"[enqueue] {out_path} frames={len(active_frames)}")
-                    except Exception:
-                        print("[warn] saver queue full -> drop clip")
+            # 締切を過ぎたら終了 → 非同期保存へ
+            if now >= stop_deadline:
+                ts = time.strftime("%Y%m%d_%H%M%S")
+                out_name = f"realtime_violence_{ts}_{clip_count:04d}.mp4"
+                out_path = os.path.join(cfg.OUTPUT_DIR, out_name)
 
-                    active = False
-                    active_frames = []
-                    post_remaining = 0
-                    last_detect_t = 0.0
+                job = SaveJob(
+                    frames=active_frames,
+                    fps=fps,
+                    size=(w, h),
+                    out_path=out_path,
+                    fourcc=cfg.REALTIME_FOURCC,
+                )
+                try:
+                    q.put_nowait(job)
+                    print(f"[enqueue] {out_path} frames={len(active_frames)}")
+                except Exception:
+                    print("[warn] saver queue full -> drop clip")
+
+                # ---- reset event state ----
+                recording = False
+                active_frames = []
+
+                # この時点のフレームまでを「前クリップ末尾」として記録（重複除外に使う）
+                last_clip_end_frame_idx = frame_idx
+
+                # 直後の連発・重複を抑える（必要なら 0.5〜2.0 で調整）
+                cooldown_until = now + getattr(cfg, "COOLDOWN_S", 0.0)
 
         frame_idx += 1
 
     cap.release()
     q.put(None)
     print("realtime done.")
+
 
 
 def main():

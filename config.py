@@ -30,7 +30,7 @@ class AppConfig:
 
     # ========= Offline segmentation =========
     MIN_EVENT_S: float = 1.0
-    MERGE_GAP_S: float = 1.0
+    MERGE_GAP_S: float = 5.0 #検知が途切れてもこの秒数はイベント継続
     PAD_S: float = 0.7
 
     # ========= Realtime recording =========
